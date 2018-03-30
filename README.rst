@@ -36,6 +36,34 @@ Finally, you are able to run the package:
     $ pipenv run python load.py
 
 
+Command Line Interface
+======================
+
+To view the list of available commands enter the following command:
+
+.. code-block:: bash
+
+    $ pipenv run python etl.py
+
+To load the finalapi.csv dataset into the database run the following command:
+
+.. code-block:: bash
+
+    $ pipenv run python etl.py load
+
+To export a profitability report by product for the agency with the id 3 for the year 2015 run the following command (to display in stdout instead of exporting to a csv, remove --dest csv):
+
+.. code-block:: bash
+
+    $ pipenv run python etl.py profitability 3 2015 --dest csv
+
+To display a cashflow report by product for the agency with the id 3 for the past 5 years run the following command (to export to a csv instead, add --dest csv):
+
+.. code-block:: bash
+
+    $ pipenv run python etl.py cashflows 3
+
+
 REST API
 ========
 
