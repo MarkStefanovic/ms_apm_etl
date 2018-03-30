@@ -1,9 +1,10 @@
-# -*- coding: utf-8 -*-
 import logging
 import os
 import sys
 
 import datetime
+
+import click
 import numpy as np
 import pandas as pd
 from sqlalchemy import INTEGER, DECIMAL, VARCHAR, CHAR
@@ -19,14 +20,35 @@ except:
     ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
+def delete_db() -> None:
+    logger.info("Wiping the database...")
+    try:
+        db_path = os.path.join(ROOT_DIR, "insurance.db")
+        if os.path.exists(db_path):
+            os.remove(db_path)
+    except Exception as e:
+        logger.error(f"There was an error connecting to the database: {e}")
+        raise
+
+
+def connect() -> Engine:
+    logger.info("Connecting to insurance.db...")
+    try:
+        db_path = os.path.join(ROOT_DIR, "insurance.db")
+        return create_engine(f"sqlite:///{db_path}")
+    except Exception as e:
+        logger.error(f"Unable to connect to the database: {e}")
+        raise
+
+
 def export_df(name: str, df: pd.DataFrame) -> None:
-    logger.info(f"Exporting the dataframe named '{name}' to a csv...")
+    logger.info(f"Exporting {name} to csv...")
     try:
         folder = os.path.join(ROOT_DIR, "out")
         if not os.path.exists(folder):
             os.mkdir(folder)
     except Exception as e:
-        logger.error("Unable to create out directory in the current folder: {e}")
+        logger.error(f"Unable to create out directory in the current folder: {e}")
         raise
 
     try:
@@ -35,15 +57,18 @@ def export_df(name: str, df: pd.DataFrame) -> None:
     except Exception as e:
         logger.error(f"There was an error exporting the '{name}' dataframe: {e}")
         raise
+    else:
+        logger.info(f"The {name} dataset was exported successfully.")
 
 
-def load_staging(csv_path: str) -> pd.DataFrame:
+def load_staging() -> pd.DataFrame:
     logger.info("Loading the staging table...")
+    csv_path = os.path.join(ROOT_DIR, "finalapi.csv")
     try:
         df = pd.read_csv(csv_path, sep=',')
         df.to_sql("staging", con=engine, if_exists="replace", index=False)
     except Exception as e:
-        logger.error(f"There was an error loading the staging table: {e}")
+        logger.error(f"There was an error loading '{csv_path}' to the staging table: {e}")
         raise
     else:
         logger.info("The staging table was successfully loaded.")
@@ -121,23 +146,16 @@ def load_agency_dim(staging: pd.DataFrame) -> pd.DataFrame:
         return df
 
 
-def connect() -> Engine:
-    """Wipe the database, create a new one and connect."""
-
-    logger.info("Resetting the database...")
-    db_path = os.path.join(ROOT_DIR, "insurance.db")
-    try:
-        if os.path.exists(db_path):
-            os.remove(db_path)
-        return create_engine(f"sqlite:///{db_path}")
-    except Exception as e:
-        logger.error(f"There was an error connecting to the database: {e}")
-        raise
+@click.group()
+def main():
+    pass
 
 
-def export_net_cash_flows(agency_id: int) -> pd.DataFrame:
-    """Export the last 5 years of net cash flows for an agency to a csv"""
-
+@main.command()
+@click.argument("agency-id")
+@click.option("--dest", "-d", default="stdout", help="Destination for the report, either 'csv' or 'stdout'")
+def cashflows(agency_id: int, dest: str) -> pd.DataFrame:
+    logger.info(f"Creating report for the last 5 years of net cash flows for an agency {agency_id}...")
     try:
         cash_flows = (
             pd.read_sql(sql="staging", con=engine)
@@ -151,8 +169,13 @@ def export_net_cash_flows(agency_id: int) -> pd.DataFrame:
             )
             .iloc[:, -5:]
         )
-
-        export_df(name="cash_flows", df=cash_flows)
+        if dest == "stdout":
+            print(cash_flows)
+        elif dest == "csv":
+            export_df(name=f"cash_flows_id-{agency_id}", df=cash_flows)
+        else:
+            logger.error("Unrecognized destination argument")
+            raise KeyError(f"The destination {dest} is not a valid option.")
     except Exception as e:
         logger.error(f"There was an error exporting the net cash flows dataset: {e}")
         raise
@@ -160,22 +183,47 @@ def export_net_cash_flows(agency_id: int) -> pd.DataFrame:
         return cash_flows
 
 
+@main.command()
+@click.argument("agency-id")
+@click.argument("year")
+@click.option("--dest", "-d", default="stdout", help="Destination for the report, either 'csv' or 'stdout'")
+def profitability(agency_id: int, year: int, dest: str) -> pd.DataFrame:
+    logger.info(f"Creating profitability report for agency {agency_id} for {year}...")
+    try:
+        profitability = (
+            pd.read_sql(sql="staging", con=engine)
+            .query(f"AGENCY_ID == {agency_id} & STAT_PROFILE_DATE_YEAR == {year}")
+            .pivot_table(values="WRTN_PREM_AMT", index="PROD_ABBR", aggfunc=np.sum)
+            .sort_values(by="WRTN_PREM_AMT", ascending=False)
+        )
+        if dest == "stdout":
+            print(profitability)
+        elif dest == "csv":
+            export_df(name=f"profitability_id-{agency_id}_yr-{year}", df=profitability)
+        else:
+            logger.error("Unrecognized destination argument")
+            raise KeyError(f"The destination {dest} is not a valid option.")
+    except Exception as e:
+        logger.error(f"There was an error exporting the profitability dataset: {e}")
+        raise
+    else:
+        return profitability
+
+
+@main.command()
+def load():
+    logger.info("Loading the data warehouse...")
+    delete_db()
+    staging = load_staging()
+    load_revenue_fact(staging=staging)
+    load_agency_dim(staging=staging)
+    load_product_dim(staging=staging)
+    logger.info("The data warehouse was loaded successfully.")
+
+
 if __name__ == '__main__':
     setup_logging(root_dir=ROOT_DIR)
     logger = logging.getLogger("root")
+    engine = connect()
+    main()
 
-    logger.info("Loading the data warehouse...")
-    try:
-        engine = connect()
-        csv_path = "finalapi.csv"
-        staging = load_staging(csv_path=csv_path)
-        load_revenue_fact(staging=staging)
-        load_agency_dim(staging=staging)
-        load_product_dim(staging=staging)
-    except Exception as e:
-        logger.error(f"There was an error loading the data warehouse: {e}")
-        raise
-    else:
-        logger.info("The data warehouse was loaded successfully.")
-
-    export_net_cash_flows(agency_id=3)
