@@ -7,12 +7,17 @@ import datetime
 import click
 import numpy as np
 import pandas as pd
+from click import Context
 from sqlalchemy import INTEGER, DECIMAL, VARCHAR, CHAR
 from sqlalchemy.engine import create_engine, Engine
 
 from setuplogging import setup_logging
 
 __version__ = '0.1'
+
+
+logger = logging.getLogger()
+
 
 try:
     ROOT_DIR = os.path.dirname(sys.argv[0])
@@ -61,7 +66,7 @@ def export_df(name: str, df: pd.DataFrame) -> None:
         logger.info(f"The {name} dataset was exported successfully.")
 
 
-def load_staging() -> pd.DataFrame:
+def load_staging(engine: Engine) -> pd.DataFrame:
     logger.info("Loading the staging table...")
     csv_path = os.path.join(ROOT_DIR, "finalapi.csv")
     try:
@@ -75,7 +80,7 @@ def load_staging() -> pd.DataFrame:
         return df
 
 
-def load_product_dim(staging: pd.DataFrame) -> pd.DataFrame:
+def load_product_dim(engine: Engine, staging: pd.DataFrame) -> pd.DataFrame:
     logger.info("Loading the product_dim table...")
     try:
         df = staging[["PROD_ABBR", "PROD_LINE"]].drop_duplicates()
@@ -88,7 +93,7 @@ def load_product_dim(staging: pd.DataFrame) -> pd.DataFrame:
         return df
 
 
-def load_revenue_fact(staging: pd.DataFrame) -> pd.DataFrame:
+def load_revenue_fact(engine: Engine, staging: pd.DataFrame) -> pd.DataFrame:
     logger.info("Loading the revenue_fact...")
     try:
         df = staging.pivot_table(
@@ -127,7 +132,7 @@ def load_revenue_fact(staging: pd.DataFrame) -> pd.DataFrame:
         return df
 
 
-def load_agency_dim(staging: pd.DataFrame) -> pd.DataFrame:
+def load_agency_dim(engine: Engine, staging: pd.DataFrame) -> pd.DataFrame:
     logger.info("Loading agency_dim...")
     try:
         df = staging[[
@@ -147,18 +152,22 @@ def load_agency_dim(staging: pd.DataFrame) -> pd.DataFrame:
 
 
 @click.group()
-def main():
-    pass
+@click.pass_context
+def cli(ctx: Context):
+    setup_logging(root_dir=ROOT_DIR)
+    global logger
+    logger = logging.getLogger("root")
 
 
-@main.command()
+@cli.command()
 @click.argument("agency-id")
 @click.option("--dest", "-d", default="stdout", help="Destination for the report, either 'csv' or 'stdout'")
-def cashflows(agency_id: int, dest: str) -> pd.DataFrame:
+@click.pass_context
+def cashflows(ctx: Context, agency_id: int, dest: str) -> pd.DataFrame:
     logger.info(f"Creating report for the last 5 years of net cash flows for an agency {agency_id}...")
     try:
         cash_flows = (
-            pd.read_sql(sql="staging", con=engine)
+            pd.read_sql(sql="staging", con=ctx.obj["engine"])
             .query(f"AGENCY_ID == '{agency_id}'")
             .assign(net_cash_flows=lambda df: df.PRD_ERND_PREM_AMT - df.PRD_INCRD_LOSSES_AMT)
             .pivot_table(
@@ -167,6 +176,7 @@ def cashflows(agency_id: int, dest: str) -> pd.DataFrame:
                 values="net_cash_flows",
                 aggfunc=np.sum
             )
+            .fillna(0)
             .iloc[:, -5:]
         )
         if dest == "stdout":
@@ -183,15 +193,16 @@ def cashflows(agency_id: int, dest: str) -> pd.DataFrame:
         return cash_flows
 
 
-@main.command()
+@cli.command()
 @click.argument("agency-id")
 @click.argument("year")
 @click.option("--dest", "-d", default="stdout", help="Destination for the report, either 'csv' or 'stdout'")
-def profitability(agency_id: int, year: int, dest: str) -> pd.DataFrame:
+@click.pass_context
+def profitability(ctx: Context, agency_id: int, year: int, dest: str) -> pd.DataFrame:
     logger.info(f"Creating profitability report for agency {agency_id} for {year}...")
     try:
         profitability = (
-            pd.read_sql(sql="staging", con=engine)
+            pd.read_sql(sql="staging", con=ctx.obj["engine"])
             .query(f"AGENCY_ID == {agency_id} & STAT_PROFILE_DATE_YEAR == {year}")
             .pivot_table(values="WRTN_PREM_AMT", index="PROD_ABBR", aggfunc=np.sum)
             .sort_values(by="WRTN_PREM_AMT", ascending=False)
@@ -210,20 +221,18 @@ def profitability(agency_id: int, year: int, dest: str) -> pd.DataFrame:
         return profitability
 
 
-@main.command()
-def load():
+@cli.command()
+@click.pass_context
+def load(ctx: Context):
     logger.info("Loading the data warehouse...")
     delete_db()
-    staging = load_staging()
-    load_revenue_fact(staging=staging)
-    load_agency_dim(staging=staging)
-    load_product_dim(staging=staging)
+    staging = load_staging(engine=ctx.obj["engine"])
+    load_revenue_fact(engine=ctx.obj["engine"], staging=staging)
+    load_agency_dim(engine=ctx.obj["engine"], staging=staging)
+    load_product_dim(engine=ctx.obj["engine"], staging=staging)
     logger.info("The data warehouse was loaded successfully.")
 
 
 if __name__ == '__main__':
-    setup_logging(root_dir=ROOT_DIR)
-    logger = logging.getLogger("root")
-    engine = connect()
-    main()
+    cli(obj={"engine": connect()})
 
